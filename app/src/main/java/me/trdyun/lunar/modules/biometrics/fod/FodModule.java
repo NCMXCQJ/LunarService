@@ -95,7 +95,7 @@ public class FodModule {
                 sfCmd = 0;
                 break;
         }
-
+        if (sfCmd == -1) return;
         if (scene == FodScene.CMD_KEYGUARD_DETECT) {
             callExtCmd(5,2);
         } else if (scene == FodScene.CMD_KEYGUARD_CANCEL_DETECT) {
