@@ -2,13 +2,17 @@ package me.trdyun.lunar.modules.biometrics.fod;
 
 import android.os.HwBinder;
 import android.os.HwParcel;
+import android.os.IBinder;
 import android.os.IHwBinder;
+import android.os.Parcel;
 import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.util.Log;
 import android.util.Slog;
 
 import java.util.ArrayList;
+import java.util.NoSuchElementException;
 
 import me.trdyun.lunar.utils.MiTouchFeature;
 
@@ -21,14 +25,58 @@ public class FodModule {
     public static boolean IS_FOD = SystemProperties.getBoolean("ro.hardware.fp.fod", false);
     public static boolean IS_FODENGINE_ENABLED = SystemProperties.get("ro.hardware.fp.fod.touch.ctl.version", "").equals("2.0");
     public static boolean IS_LOADED = false;
+    private static final Object DAEMON_BINDER_LOCK = new Object();
+    public static final int SERVICE_VERSION_CODE_AIDL = 2;
+    public static final int SERVICE_VERSION_CODE_HIDL = 1;
+    public static final int SERVICE_VERSION_CODE_NONE = 0;
 
+    private static final String NAME_EXT_DAEMON = "vendor.xiaomi.hardware.fingerprintextension@1.0::IXiaomiFingerprint";
+    private static final String NAME_EXT_DAEMON_AIDL = "vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint/default";
     private static IHwBinder mExtDaemon;
+    private static IHwBinder.DeathRecipient mDeathRecipient = new IHwBinder.DeathRecipient() {
+        @Override
+        public void serviceDied(long cookie) {
+            if (mExtDaemon == null) return;
+            try {
+                mExtDaemon.unlinkToDeath(mDeathRecipient);
+                mExtDaemon = null;
+                mExtDaemon = getExtDaemon();
+            }catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    };
+    private static IBinder mDaemonBinder;
+    private static IBinder.DeathRecipient mDeathRecipientAidl = new IBinder.DeathRecipient(){
+        @Override
+        public void binderDied() {
+            if (mDaemonBinder == null) return;
+            mDaemonBinder.unlinkToDeath(mDeathRecipientAidl, 0);
+            mDaemonBinder = null;
+        }
+    };
 
-    static {
-        initExtDaemon();
+    private static int mServiceVersion = 0;
+
+    private static IHwBinder getExtDaemon() throws RemoteException{
+        if (mExtDaemon == null) {
+            IHwBinder service = HwBinder.getService(NAME_EXT_DAEMON, "default");
+            mExtDaemon = service;
+            service.linkToDeath(mDeathRecipient, 0L);
+        }
+        return mExtDaemon;
     }
 
-    public static void fodCall(String sceneCode, int param) {
+    private static IBinder getExtDaemonAidl() throws RemoteException{
+        if (mDaemonBinder == null) {
+            IBinder service = ServiceManager.getService(NAME_EXT_DAEMON_AIDL);
+            mDaemonBinder = service;
+            service.linkToDeath(mDeathRecipientAidl, 0);
+        }
+        return mDaemonBinder;
+    }
+
+    public synchronized static void fodCall(String sceneCode, int param) {
         if (!IS_LOADED || !IS_FODENGINE_ENABLED || !IS_FOD) {
             Log.w(TAG, "Not Udfps device or xiaomi hal not init, pass");
             return;
@@ -109,46 +157,100 @@ public class FodModule {
         }
     }
 
+    private static final String EXT_DESCRIPTOR = "vendor.xiaomi.hardware.fingerprintextension@1.0::IXiaomiFingerprint";
+    private static final String EXT_DESCRIPTOR_AIDL = "vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint";
+
     private static int callExtCmd(int cmd, int param) {
         if (cmd == 0) return -1;
-        if (mExtDaemon == null) initExtDaemon();
-        if (mExtDaemon == null) return -1;
-        try {
-            HwParcel request = new HwParcel();
-            request.writeInterfaceToken("vendor.xiaomi.hardware.fingerprintextension@1.0::IXiaomiFingerprint");
-            request.writeInt32(cmd);
-            request.writeInt32(param);
-            HwParcel reply = new HwParcel();
-            mExtDaemon.transact(1, request, reply, 0);
-            reply.verifySuccess();
-            request.releaseTemporaryStorage();
-            return reply.readInt32();
-        }catch (Exception e) {
-            Slog.e(TAG, e.getMessage());
-            return -1;
+        int result = -1;
+        switch (mServiceVersion) {
+            case -1:
+                return -1;
+            default:
+            case 0:
+                try {
+                    if (getExtDaemon() != null) mServiceVersion = 1;
+                    return callExtCmd(cmd, param);
+                }catch (RemoteException e) {
+                    Slog.e(TAG, e.getMessage());
+                    e.printStackTrace();
+                    mServiceVersion = -1;
+                }
+                try {
+                    if (getExtDaemonAidl() != null) mServiceVersion = 2;
+                    return callExtCmd(cmd, param);
+                }catch (RemoteException e) {
+                    Slog.e(TAG, e.getMessage());
+                    e.printStackTrace();
+                    mServiceVersion = -1;
+                }
+                return result;
+            case 1:
+                if (mExtDaemon == null) {
+                    try {
+                        getExtDaemon();
+                    }catch (Exception e) {
+                        Slog.e(TAG, "Failed when get miext hidl");
+                    }
+                }
+                if (mExtDaemon != null) {
+                    HwParcel hidl_reply = new HwParcel();
+                    try {
+                        try {
+                            HwParcel hidl_request = new HwParcel();
+                            hidl_request.writeInterfaceToken(EXT_DESCRIPTOR);
+                            hidl_request.writeInt32(cmd);
+                            hidl_request.writeInt32(param);
+                            mExtDaemon.transact(1, hidl_request, hidl_reply, 0);
+                            hidl_reply.verifySuccess();
+                            hidl_request.releaseTemporaryStorage();
+                            result = hidl_reply.readInt32();
+                        } catch (RemoteException | NoSuchElementException e3) {
+                            mExtDaemon = null;
+                        }
+                        hidl_reply.release();
+                    } catch (Throwable th) {
+                        hidl_reply.release();
+                        throw th;
+                    }
+                }
+                return result;
+            case 2:
+                synchronized (DAEMON_BINDER_LOCK) {
+                    if (mDaemonBinder == null) {
+                        try {
+                            getExtDaemonAidl();
+                        }catch (RemoteException e) {
+                            Slog.e(TAG, "Failed when get miext aidl");
+                        }
+                    }
+                    if (mDaemonBinder != null) {
+                        Parcel parcel = Parcel.obtain();
+                        Parcel reply = Parcel.obtain();
+                        try {
+                            try {
+                                parcel.writeInterfaceToken(EXT_DESCRIPTOR_AIDL);
+                                parcel.writeInt(cmd);
+                                parcel.writeInt(param);
+                                mDaemonBinder.transact(1, parcel, reply, 0);
+                                reply.readException();
+                                result = reply.readInt();
+                                parcel.recycle();
+                            } catch (Throwable th2) {
+                                parcel.recycle();
+                                reply.recycle();
+                                throw th2;
+                            }
+                        } catch (RemoteException e5) {
+                            Slog.e(TAG, "[JAVA] transact failed. " + e5);
+                            parcel.recycle();
+                        }
+                        reply.recycle();
+                    }
+                }
+                return result;
         }
     }
 
-    private static void initExtDaemon() {
-        try {
-            mExtDaemon = HwBinder.getService("vendor.xiaomi.hardware.fingerprintextension@1.0::IXiaomiFingerprint", "default");
-            mExtDaemon.linkToDeath(deathRecipient, 0);
-            IS_LOADED = true;
-        }catch (RemoteException e) {
-            Log.e(TAG, "Xiaomi Fingerprint Service error");
-        }
-    }
-
-    private static IHwBinder.DeathRecipient deathRecipient = new IHwBinder.DeathRecipient() {
-        @Override
-        public void serviceDied(long l) {
-            Slog.e(TAG, "xiaomi ext daemon died");
-            IS_LOADED = false;
-            if (mExtDaemon == null) return;
-            mExtDaemon.unlinkToDeath(this::serviceDied);
-            mExtDaemon = null;
-            initExtDaemon();
-        }
-    };
 
 }
