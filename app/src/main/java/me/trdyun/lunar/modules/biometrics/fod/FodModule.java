@@ -26,9 +26,6 @@ public class FodModule {
     public static boolean IS_FODENGINE_ENABLED = SystemProperties.get("ro.hardware.fp.fod.touch.ctl.version", "").equals("2.0");
     public static boolean IS_LOADED = false;
     private static final Object DAEMON_BINDER_LOCK = new Object();
-    public static final int SERVICE_VERSION_CODE_AIDL = 2;
-    public static final int SERVICE_VERSION_CODE_HIDL = 1;
-    public static final int SERVICE_VERSION_CODE_NONE = 0;
 
     private static final String NAME_EXT_DAEMON = "vendor.xiaomi.hardware.fingerprintextension@1.0::IXiaomiFingerprint";
     private static final String NAME_EXT_DAEMON_AIDL = "vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint/default";
